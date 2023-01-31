@@ -1,0 +1,68 @@
+sudo: required
+
+branches:
+  except:
+    - weblate
+services:
+  - docker
+before_install:
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+  - sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+  - sudo apt-get update
+  - sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-ce
+  - docker --version
+  - curl -L https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-`uname -s`-`uname -m` > docker-compose
+  - chmod +x docker-compose
+  - sudo mv docker-compose /usr/local/bin
+
+script:
+  - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+  - docker run --rm -v $(pwd):/app jekkos/composer composer install
+  - docker run --rm -v $(pwd):/app jekkos/composer php bin/install.php translations develop
+  - sed -i "s/'\(dev\)'/'$rev'/g" application/config/config.php
+  - version=$(grep application_version application/config/config.php | sed "s/.*=\s'\(.*\)';/\1/g")
+  - echo "$version-$branch-$rev" 
+  - npm version "$version-$branch-$rev" --force || true
+  - docker run --rm -it -v $(pwd):/app -w /app opensourcepos/node-grunt-bower
+    sh -c "npm install && bower install && grunt package"
+  - docker build . --target ospos -t ospos
+  - docker-compose -f docker-compose.test.yml up --abort-on-container-exit
+  - docker build database/ -t jekkos/opensourcepos:sqlscript
+env:
+  global:
+  - DOCKER_COMPOSE_VERSION=1.29.1
+  - BRANCH=$(echo ${TRAVIS_BRANCH} | sed s/feature\\///)
+  - date=`date +%Y%m%d%H%M%S` && branch=${TRAVIS_BRANCH} && rev=`git rev-parse --short=6 HEAD` 
+after_success:
+  - TAG=${TRAVIS_TAG:-$BRANCH}
+  - docker login -u="$DOCKER_USERNAME" -p="$DOCKER_PASSWORD" && docker tag "ospos:latest"
+    "jekkos/opensourcepos:$TAG" && docker push "jekkos/opensourcepos:$TAG" && docker push "jekkos/opensourcepos:sqlscript"
+  - sudo mv dist/opensourcepos.tgz "dist/opensourcepos.$version.$rev.tgz"
+  - sudo mv dist/opensourcepos.zip "dist/opensourcepos.$version.$rev.zip"
+before_deploy:
+  - npm set //npm.pkg.github.com/:_authToken "$NPM_TOKEN"
+deploy:
+  - provider: npm
+    file: dist/opensourcepos.$version.$rev.tgz
+    registry: npm.pkg.github.com
+    email: jeroen@steganos.dev
+    skip_cleanup: true
+    api_key:
+      secure: "bmOfMoGBi+wTEdTbIB7wPenNTCZrmHAa05xZnMxZSOjxplZpnZSO4Tvnnkihz9LpbF3xT1hm76AJJuZonu2HKtUez+6L4Fg+i/jS8Ij/BZlbvKBVTeB+2yN09ncXNmObnl1bShtm90d2WYQJKk3NJGuEboFQNxwJLYJXg33iMhc="
+
+    on:
+      all_branches: true
+  - provider: releases
+    file: dist/opensourcepos.$version.$rev.zip
+    name: "OpensourcePos $version"
+    release_notes_file: WHATS_NEW.txt
+    prerelease: true
+    skip_cleanup: true
+
+    user: jekkos
+    overwrite: true
+    api_key:
+      secure: Ax25mMRDfHVf/HjRwqxYJe2oMnWC4sc2aKIiUxAOviVJJSCl4GMWhcFlUNnFsDcKIg2ofEGMVD6b9cTBuOwPDvymUDFnLNCCgDWve+vRDdWaTkTipn77Qk4c9UO9VvuzlPSKopChefPHlQ0n1rEmAMiKIXuqjUlNGqybW4FLP4E=
+    on:
+      tags: true
+      branch: master
